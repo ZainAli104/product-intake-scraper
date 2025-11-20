@@ -4,9 +4,10 @@ FROM python:3.13-slim
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies (Chromium on Debian, webdriver comes from chromedriver-binary Python pkg)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
     chromium \
+    chromium-driver \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy scraper files

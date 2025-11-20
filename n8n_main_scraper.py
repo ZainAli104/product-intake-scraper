@@ -92,26 +92,60 @@ def scrape_bestbuy_product(product_url: str) -> Dict:
         except:
             pass
 
-        # Try to click Specifications section to load specs/UPC
+        # Try to click Specifications section or button to load specs/UPC
+        # Handle two different UI patterns:
+        # Pattern 1: "Specifications" as clickable section (h2/h3)
+        # Pattern 2: "See All Specifications" button
+        modal_opened = False
         try:
-            spec_elements = driver.find_elements(By.XPATH,
-                "//h2[contains(text(), 'Specifications')] | " +
-                "//h3[contains(text(), 'Specifications')] | " +
-                "//*[@role='button' and contains(text(), 'Specifications')]"
-            )
-            if spec_elements:
-                for spec_elem in spec_elements:
-                    try:
-                        driver.execute_script("arguments[0].scrollIntoView(true);", spec_elem)
-                        time.sleep(0.5)
-                        try:
-                            spec_elem.click()
-                        except:
-                            driver.execute_script("arguments[0].click();", spec_elem)
-                        time.sleep(3)  # Wait for modal to load
-                        break
-                    except:
-                        pass
+            # Try multiple selectors to find the button/section (case-insensitive)
+            spec_selectors = [
+                # Try "See All Specifications" button first (more specific)
+                "//button[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'see all specifications')]",
+                "//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'see all specifications')]",
+                "//*[@role='button' and contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'see all specifications')]",
+                # Try "Specifications" section header
+                "//h2[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'specifications')]",
+                "//h3[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'specifications')]",
+                "//*[@role='button' and contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'specifications')]",
+            ]
+            
+            for selector in spec_selectors:
+                try:
+                    spec_elements = driver.find_elements(By.XPATH, selector)
+                    if spec_elements:
+                        for spec_elem in spec_elements:
+                            try:
+                                # Scroll to element
+                                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", spec_elem)
+                                time.sleep(0.5)
+                                
+                                # Click the element
+                                try:
+                                    spec_elem.click()
+                                except:
+                                    driver.execute_script("arguments[0].click();", spec_elem)
+                                
+                                # Wait for modal/dialog to appear (check for modal, dialog, or overlay)
+                                try:
+                                    # Wait for either modal element or UPC text to appear
+                                    WebDriverWait(driver, 5).until(
+                                        lambda d: len(d.find_elements(By.XPATH, "//*[contains(@class, 'modal') or contains(@class, 'dialog') or contains(@role, 'dialog')]")) > 0 or
+                                                  len(d.find_elements(By.XPATH, "//*[contains(., 'UPC') or contains(., 'Universal Product Code')]")) > 0
+                                    )
+                                    modal_opened = True
+                                    time.sleep(2)  # Additional wait for content to load
+                                except:
+                                    time.sleep(3)  # Fallback wait if explicit wait fails
+                                    modal_opened = True  # Assume modal opened if we clicked
+                                
+                                break
+                            except Exception as e:
+                                continue
+                        if modal_opened:
+                            break
+                except:
+                    continue
         except:
             pass
 
@@ -119,7 +153,7 @@ def scrape_bestbuy_product(product_url: str) -> Dict:
         driver.execute_script("window.scrollBy(0, 500);")
         time.sleep(2)
 
-        # Get page source
+        # Get page source AFTER modal might have opened
         page_source = driver.page_source
         soup = BeautifulSoup(page_source, 'html.parser')
 
@@ -164,7 +198,36 @@ def scrape_bestbuy_product(product_url: str) -> Dict:
             result['availability'] = 'Out of Stock'
 
         # Extract UPC - Multiple methods
-        upc = _extract_upc(soup, page_text)
+        # First try from the driver directly (to catch dynamically loaded modal content)
+        upc = None
+        if modal_opened:
+            try:
+                # Try to find UPC directly in the modal using Selenium
+                upc_elements = driver.find_elements(By.XPATH, 
+                    "//*[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'upc') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'universal product code')]"
+                )
+                for elem in upc_elements:
+                    elem_text = elem.text
+                    match = re.search(r'(?:UPC|Universal Product Code)[\s:]*([0-9]{8,14})', elem_text, re.IGNORECASE)
+                    if match:
+                        candidate = match.group(1).strip()
+                        if len(candidate) >= 8:
+                            upc = candidate
+                            break
+                    # Also try to find numbers near UPC text
+                    match = re.search(r'([0-9]{8,14})', elem_text)
+                    if match:
+                        candidate = match.group(1).strip()
+                        if len(candidate) >= 8 and len(candidate) <= 14:
+                            upc = candidate
+                            break
+            except:
+                pass
+        
+        # Fallback to soup-based extraction
+        if not upc:
+            upc = _extract_upc(soup, page_text, driver if modal_opened else None)
+        
         if upc:
             result['upc'] = upc
 
@@ -207,39 +270,65 @@ def scrape_bestbuy_product(product_url: str) -> Dict:
     return result
 
 
-def _extract_upc(soup: BeautifulSoup, page_text: str) -> Optional[str]:
+def _extract_upc(soup: BeautifulSoup, page_text: str, driver=None) -> Optional[str]:
     """Extract UPC from various locations on page."""
 
-    # Pattern 1: Direct UPC label
-    match = re.search(r'UPC[\s:]*([0-9]{8,14})', page_text, re.IGNORECASE)
-    if match:
-        upc = match.group(1).strip()
-        if len(upc) >= 8:
-            return upc
-
-    # Pattern 2: GTIN/EAN
-    match = re.search(r'(?:GTIN|EAN)[\s:]*([0-9]{8,14})', page_text, re.IGNORECASE)
-    if match:
-        upc = match.group(1).strip()
-        if len(upc) >= 8:
-            return upc
-
-    # Pattern 3: Universal Product Code
-    match = re.search(r'Universal Product Code[\s:]*([0-9]{8,14})', page_text, re.IGNORECASE)
-    if match:
-        upc = match.group(1).strip()
-        if len(upc) >= 8:
-            return upc
-
-    # Pattern 4: Look in specifications table
-    specs_table = soup.find('table', class_=lambda x: x and 'spec' in (x or '').lower())
-    if specs_table:
-        spec_text = specs_table.get_text()
-        match = re.search(r'([0-9]{8,14})', spec_text)
+    # Pattern 1: Direct UPC label (with various formats)
+    patterns = [
+        r'UPC[\s:]*([0-9]{8,14})',
+        r'(?:GTIN|EAN)[\s:]*([0-9]{8,14})',
+        r'Universal Product Code[\s:]*([0-9]{8,14})',
+        r'UPC[^0-9]*([0-9]{11,14})',  # UPC-A is typically 12 digits
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, page_text, re.IGNORECASE)
         if match:
-            candidate = match.group(1)
-            if len(candidate) >= 8:
+            upc = match.group(1).strip()
+            if len(upc) >= 8 and len(upc) <= 14:
+                return upc
+
+    # Pattern 2: Look in modal/dialog content if driver is provided
+    if driver:
+        try:
+            # Try to find modal/dialog elements
+            modal_elements = driver.find_elements(By.XPATH,
+                "//*[contains(@class, 'modal') or contains(@class, 'dialog') or contains(@role, 'dialog')]"
+            )
+            for modal in modal_elements:
+                modal_text = modal.text
+                for pattern in patterns:
+                    match = re.search(pattern, modal_text, re.IGNORECASE)
+                    if match:
+                        upc = match.group(1).strip()
+                        if len(upc) >= 8 and len(upc) <= 14:
+                            return upc
+        except:
+            pass
+
+    # Pattern 3: Look in specifications table/section
+    specs_sections = soup.find_all(['table', 'div', 'section'], 
+                                  class_=lambda x: x and ('spec' in (x or '').lower() or 'detail' in (x or '').lower()))
+    for spec_section in specs_sections:
+        spec_text = spec_section.get_text()
+        # Look for UPC followed by numbers
+        match = re.search(r'UPC[^0-9]*([0-9]{8,14})', spec_text, re.IGNORECASE)
+        if match:
+            candidate = match.group(1).strip()
+            if len(candidate) >= 8 and len(candidate) <= 14:
                 return candidate
+
+    # Pattern 4: Look for standalone UPC-like numbers (11-14 digits) near "UPC" text
+    lines = page_text.split('\n')
+    for i, line in enumerate(lines):
+        if 'upc' in line.lower() or 'universal product code' in line.lower():
+            # Check current line and next few lines for UPC number
+            search_text = ' '.join(lines[i:min(i+3, len(lines))])
+            match = re.search(r'([0-9]{11,14})', search_text)
+            if match:
+                candidate = match.group(1).strip()
+                if len(candidate) >= 11 and len(candidate) <= 14:
+                    return candidate
 
     return None
 
