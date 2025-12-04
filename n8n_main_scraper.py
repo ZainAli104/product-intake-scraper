@@ -185,7 +185,10 @@ def scrape_bestbuy_product(product_url: str) -> Dict:
 
         # Extract model from text
         page_text = soup.get_text()
-        model_match = re.search(r'Model[:\s]*([A-Z0-9]+)', page_text, re.IGNORECASE)
+        model_match = re.search(r'Model[:\s]*([A-Z0-9]+/[A-Z0-9]+)(?:\s|SKU)', page_text, re.IGNORECASE)
+        if not model_match:
+            # Fallback: try without slash
+            model_match = re.search(r'Model[:\s]*([A-Z0-9]+)', page_text, re.IGNORECASE)
         if model_match:
             result['model'] = model_match.group(1).strip()
 
