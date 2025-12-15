@@ -56,12 +56,16 @@ def scrape_bestbuy_first_product(search_url: str) -> Dict:
 
     driver = None
     try:
-        # Set up Chrome options
+        # Set up Chrome/Chromium options
         chrome_options = Options()
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-blink-features=AutomationControlled')
         chrome_options.add_argument('--headless')
+        # Use Chromium binary if available (for Docker)
+        import os
+        if os.path.exists('/usr/bin/chromium'):
+            chrome_options.binary_location = '/usr/bin/chromium'
 
         # Initialize webdriver
         driver = webdriver.Chrome(options=chrome_options)

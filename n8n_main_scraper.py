@@ -70,12 +70,16 @@ def scrape_bestbuy_product(product_url: str) -> Dict:
 
     driver = None
     try:
-        # Set up Chrome options
+        # Set up Chrome/Chromium options
         chrome_options = Options()
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-blink-features=AutomationControlled')
         chrome_options.add_argument('--headless')
+        # Use Chromium binary if available (for Docker)
+        import os
+        if os.path.exists('/usr/bin/chromium'):
+            chrome_options.binary_location = '/usr/bin/chromium'
 
         # Initialize webdriver
         driver = webdriver.Chrome(options=chrome_options)
@@ -185,12 +189,33 @@ def scrape_bestbuy_product(product_url: str) -> Dict:
 
         # Extract model from text
         page_text = soup.get_text()
-        model_match = re.search(r'Model[:\s]*([A-Z0-9]+/[A-Z0-9]+)(?:\s|SKU)', page_text, re.IGNORECASE)
+        # Pattern 1: Model with slash (e.g., "MYW33LL/A") - stop before SKU
+        model_match = re.search(r'Model[:\s]*([A-Z0-9-]+/[A-Z0-9-]+?)(?=\s*SKU|$|\s)', page_text, re.IGNORECASE)
+        print(model_match)
         if not model_match:
-            # Fallback: try without slash
-            model_match = re.search(r'Model[:\s]*([A-Z0-9]+)', page_text, re.IGNORECASE)
+            # Fallback: Model without slash (e.g., "960-001201")
+            # Try pattern that stops before SKU (even if no space between)
+            model_match = re.search(r'Model[:\s]*([A-Z0-9-]+?)(?=\s*SKU|$|\s)', page_text, re.IGNORECASE)
+            print(model_match)
+            # If lookahead doesn't work, match everything and clean up aggressively
+            if not model_match:
+                model_match = re.search(r'Model[:\s]*([A-Z0-9-]+)', page_text, re.IGNORECASE)
+                print(model_match)
         if model_match:
-            result['model'] = model_match.group(1).strip()
+            model = model_match.group(1).strip()
+            # Aggressively remove "SKU" from anywhere in the model string
+            # Method 1: Find SKU position and truncate there (most reliable)
+            model_upper = model.upper()
+            sku_pos = model_upper.find('SKU')
+            if sku_pos > 0:
+                model = model[:sku_pos].strip()
+            # Method 2: Check if ends with SKU and remove last 3 chars (backup)
+            elif len(model) >= 3 and model_upper.endswith('SKU'):
+                model = model[:-3].strip()
+            # Method 3: Regex substitution to remove SKU at end (final safety net)
+            model = re.sub(r'(?i)SKU$', '', model).strip()
+            result['model'] = model
+            print(model_match)
 
         # Extract availability/stock
         if 'in stock' in page_text.lower():
