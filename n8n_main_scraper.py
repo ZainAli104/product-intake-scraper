@@ -5,7 +5,7 @@ Use this in N8N Code Node to scrape full product details including UPC.
 
 import time
 import re
-from typing import Dict, Optional, List
+from typing import Dict, Optional
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -27,10 +27,8 @@ def scrape_bestbuy_product(product_url: str) -> Dict:
         product_url (str): The Best Buy product page URL
 
     Returns:
-        Dict: Complete product information including:
-              - url, name, price, rating, review_count
-              - sku, upc, model, availability, in_stock
-              - categories, images, specifications
+        Dict: Essential product information including:
+              - name, description, model, upc, sku, price
               - status, message (for error handling)
 
     Example:
@@ -41,20 +39,12 @@ def scrape_bestbuy_product(product_url: str) -> Dict:
     result = {
         'status': 'success',
         'message': '',
-        'url': product_url,
         'name': 'Not found',
         'price': 'Not available',
-        'rating': 'No rating',
-        'review_count': '0',
         'sku': 'N/A',
         'upc': 'Not available',
         'model': 'Not found',
-        'availability': 'Availability unknown',
-        'in_stock': False,
-        'description': '',
-        'categories': [],
-        'images': [],
-        'specifications': []
+        'description': ''
     }
 
     # Validate URL
@@ -63,7 +53,7 @@ def scrape_bestbuy_product(product_url: str) -> Dict:
         result['message'] = 'product_url must be a string'
         return result
 
-    if 'bestbuy.com' not in product_url or '/product/' not in product_url:
+    if 'bestbuy.com' not in product_url or ('/product/' not in product_url and '/site/' not in product_url):
         result['status'] = 'error'
         result['message'] = 'Invalid Best Buy product URL'
         return result
@@ -76,6 +66,12 @@ def scrape_bestbuy_product(product_url: str) -> Dict:
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-blink-features=AutomationControlled')
         chrome_options.add_argument('--headless')
+        chrome_options.add_argument('user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+
+        # Exclude automation flags
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
+
         # Use Chromium binary if available (for Docker)
         import os
         if os.path.exists('/usr/bin/chromium'):
@@ -84,9 +80,34 @@ def scrape_bestbuy_product(product_url: str) -> Dict:
         # Initialize webdriver
         driver = webdriver.Chrome(options=chrome_options)
 
+        # Remove webdriver property
+        driver.execute_cdp_cmd('Network.setUserAgentOverride', {
+            "userAgent": 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
+        driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
         # Load page
         driver.get(product_url)
-        time.sleep(3)
+        time.sleep(5)
+
+        # Check if we're on a country selection or redirect page
+        current_url = driver.current_url
+        page_title = driver.title.lower()
+
+        # If redirected or on country selection, try to handle it
+        if 'country' in page_title or 'choose' in page_title or current_url != product_url:
+            # Try clicking US/America link if present
+            try:
+                us_links = driver.find_elements(By.XPATH,
+                    "//a[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'united states') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'us')]"
+                )
+                if us_links:
+                    us_links[0].click()
+                    time.sleep(3)
+            except:
+                # If that fails, try navigating directly again
+                driver.get(product_url)
+                time.sleep(5)
 
         # Wait for page content
         try:
@@ -173,57 +194,13 @@ def scrape_bestbuy_product(product_url: str) -> Dict:
             if price_text:
                 result['price'] = price_text
 
-        # Extract rating
-        rating_elem = soup.find('div', class_=lambda x: x and 'rating' in (x or '').lower())
-        if rating_elem:
-            rating_text = rating_elem.get_text(strip=True)
-            if rating_text:
-                result['rating'] = rating_text
-
-        # Extract review count
-        review_elem = soup.find('span', class_=lambda x: x and 'reviews' in (x or '').lower())
-        if review_elem:
-            review_text = review_elem.get_text(strip=True)
-            if review_text:
-                result['review_count'] = review_text
-
-        # Extract model from text
+        # Extract page text (needed for model and UPC extraction)
         page_text = soup.get_text()
-        # Pattern 1: Model with slash (e.g., "MYW33LL/A") - stop before SKU
-        model_match = re.search(r'Model[:\s]*([A-Z0-9-]+/[A-Z0-9-]+?)(?=\s*SKU|$|\s)', page_text, re.IGNORECASE)
-        print(model_match)
-        if not model_match:
-            # Fallback: Model without slash (e.g., "960-001201")
-            # Try pattern that stops before SKU (even if no space between)
-            model_match = re.search(r'Model[:\s]*([A-Z0-9-]+?)(?=\s*SKU|$|\s)', page_text, re.IGNORECASE)
-            print(model_match)
-            # If lookahead doesn't work, match everything and clean up aggressively
-            if not model_match:
-                model_match = re.search(r'Model[:\s]*([A-Z0-9-]+)', page_text, re.IGNORECASE)
-                print(model_match)
-        if model_match:
-            model = model_match.group(1).strip()
-            # Aggressively remove "SKU" from anywhere in the model string
-            # Method 1: Find SKU position and truncate there (most reliable)
-            model_upper = model.upper()
-            sku_pos = model_upper.find('SKU')
-            if sku_pos > 0:
-                model = model[:sku_pos].strip()
-            # Method 2: Check if ends with SKU and remove last 3 chars (backup)
-            elif len(model) >= 3 and model_upper.endswith('SKU'):
-                model = model[:-3].strip()
-            # Method 3: Regex substitution to remove SKU at end (final safety net)
-            model = re.sub(r'(?i)SKU$', '', model).strip()
-            result['model'] = model
-            print(model_match)
 
-        # Extract availability/stock
-        if 'in stock' in page_text.lower():
-            result['in_stock'] = True
-            result['availability'] = 'In Stock'
-        elif 'out of stock' in page_text.lower():
-            result['in_stock'] = False
-            result['availability'] = 'Out of Stock'
+        # Extract model number from specifications modal
+        model = _extract_model(soup, page_text, driver if modal_opened else None)
+        if model:
+            result['model'] = model
 
         # Extract UPC - Multiple methods
         # First try from the driver directly (to catch dynamically loaded modal content)
@@ -267,18 +244,6 @@ def scrape_bestbuy_product(product_url: str) -> Dict:
                 sku_candidate = last_part.split('?')[0]
                 if len(sku_candidate) > 3:  # SKU is usually longer
                     result['sku'] = sku_candidate
-
-        # Extract images
-        images = _extract_images(soup)
-        result['images'] = images
-
-        # Extract categories
-        categories = _extract_categories(soup)
-        result['categories'] = categories
-
-        # Extract specifications
-        specs = _extract_specifications(soup)
-        result['specifications'] = specs
 
         # Extract description
         desc_elem = soup.find('div', class_=lambda x: x and 'description' in (x or '').lower())
@@ -361,56 +326,25 @@ def _extract_upc(soup: BeautifulSoup, page_text: str, driver=None) -> Optional[s
     return None
 
 
-def _extract_images(soup: BeautifulSoup) -> List[str]:
-    """Extract product images from page."""
-    images = []
+def _extract_model(soup: BeautifulSoup, page_text: str, driver=None) -> Optional[str]:
+    """Extract Model Number from specifications modal (same approach as UPC extraction)."""
 
-    # Look for image containers
-    img_elements = soup.find_all('img', class_=lambda x: x and 'product' in (x or '').lower())
+    # Only extract from modal if driver is provided (modal was opened)
+    if driver:
+        try:
+            # Try to find modal/dialog elements
+            modal_elements = driver.find_elements(By.XPATH,
+                "//*[contains(@class, 'modal') or contains(@class, 'dialog') or contains(@role, 'dialog')]"
+            )
+            for modal in modal_elements:
+                modal_text = modal.text
+                # Look for "Model Number" followed by the value
+                match = re.search(r'Model\s+Number\s+([A-Z0-9-/]+)', modal_text, re.IGNORECASE)
+                if match:
+                    model = match.group(1).strip()
+                    if len(model) >= 5 and len(model) <= 25:
+                        return model
+        except:
+            pass
 
-    for img in img_elements[:10]:  # Limit to 10 images
-        src = img.get('src') or img.get('data-src')
-        if src and 'bestbuy' in src and src not in images:
-            images.append(src)
-
-    return images
-
-
-def _extract_categories(soup: BeautifulSoup) -> List[str]:
-    """Extract product categories/breadcrumbs."""
-    categories = []
-
-    # Look for breadcrumb navigation
-    breadcrumb = soup.find('nav', class_=lambda x: x and 'breadcrumb' in (x or '').lower())
-    if breadcrumb:
-        items = breadcrumb.find_all('a')
-        for item in items:
-            text = item.get_text(strip=True)
-            if text and text not in categories:
-                categories.append(text)
-
-    return categories
-
-
-def _extract_specifications(soup: BeautifulSoup) -> List[Dict]:
-    """Extract product specifications."""
-    specs = []
-
-    # Look for specifications section
-    spec_section = soup.find('div', class_=lambda x: x and 'specification' in (x or '').lower())
-
-    if spec_section:
-        # Try to extract spec rows
-        rows = spec_section.find_all(['tr', 'div'], class_=lambda x: x and 'row' in (x or '').lower())
-        for row in rows[:5]:  # Limit to 5 specs
-            cells = row.find_all(['td', 'div'])
-            if len(cells) >= 2:
-                key = cells[0].get_text(strip=True)
-                value = cells[1].get_text(strip=True)
-                if key and value:
-                    specs.append({'key': key, 'value': value})
-
-    if not specs:
-        specs.append({'note': 'No specifications found'})
-
-    return specs
+    return None
